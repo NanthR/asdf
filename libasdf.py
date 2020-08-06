@@ -436,6 +436,7 @@ def cmd_push(args):
 		else:
 			print("No url specified")
 			print('  To set a default remote, use "asdf remote add <name> <url>"')
+			return
 		
 
 	user = input("UserName: ")

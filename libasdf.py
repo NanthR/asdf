@@ -3,6 +3,7 @@ from operator import attrgetter
 from dotenv import load_dotenv
 from getpass import getpass
 from shutil import rmtree
+import argcomplete
 
 load_dotenv()
 
@@ -11,6 +12,19 @@ IndexEntry = collections.namedtuple('IndexEntry', ['ctime_s', 'ctime_n', 'mtime_
 Types = {"commit": 1, "tree": 2, "blob": 3}
 
 #ONLY WORKS WITH ONE MAIN FOLDER. FOLDERS INSIDE MAIN FOLDER ARE NOT SUPPORTED
+
+def check_git():
+	present = os.getcwd()
+	if ".git" in os.listdir():
+		return
+	while present != "/":
+		present = os.path.dirname(present)
+		if ".git" in os.listdir():
+			return
+	print("\033[91m ERROR: Not a git repository\033[00m")
+	sys.exit()
+
+	
 
 def default_config():
 	config = configparser.ConfigParser()
@@ -60,12 +74,18 @@ def cmd_hash_object(file, object_type, write=True, filew=True):
 	sha1 = hashlib.sha1(full_data).hexdigest()
 
 	if write:
-		path = os.path.join('.git', 'objects', sha1[:2], sha1[2:])
+		path = f'.git/objects/{sha1[:2]}/{sha1[2:]}'
 		if not os.path.exists(path):
 			os.makedirs(os.path.dirname(path), exist_ok="True")
 			with open(path, "wb") as f:
 				f.write(zlib.compress(full_data))
 	return sha1
+
+def cmd_rm(paths):
+	fields = read_index()
+	fields = [i for i in fields if i.path not in paths]
+	write_index(fields)
+
 
 def read_file(file):
 	try:
@@ -286,7 +306,7 @@ def cmd_status():
 			tree_hash = re.split(b'\x00', zlib.decompress(f.read()), 1)[1].split(b' ')[1].split(b'\n')[0].decode()
 		with open(f".git/objects/{tree_hash[:2]}/{tree_hash[2:]}", "rb") as f:
 			m = zlib.decompress(f.read())
-		# print(m)
+
 		tree = read_tree(m).strip().split('\n')
 		tree_dict = {}
 		for i in tree:
@@ -295,7 +315,12 @@ def cmd_status():
 		not_for_commit = []
 
 		for i in fields:
-			files.remove(i.path)
+			flag = 0
+			try:
+				files.remove(i.path)
+			except ValueError:
+				not_for_commit.append(f"deleted:    {i.path}")
+				flag = 1
 			if i.path in tree_dict.keys():
 				if tree_dict[i.path] == i.sha.hex():
 					pass
@@ -304,8 +329,9 @@ def cmd_status():
 			else:
 				changed_files.append(f"new file: {i.path}")
 			
-			if i.sha.hex() != cmd_hash_object(i.path, 'blob', False, True):
-				not_for_commit.append(i.path)
+			if flag == 0:
+				if i.sha.hex() != cmd_hash_object(i.path, 'blob', False, True):
+					not_for_commit.append(f"modified:   {i.path}")
 
 		if changed_files:
 			print("Changes to be committed")
@@ -318,7 +344,7 @@ def cmd_status():
 			print('  (use "asdf add <file>" to add the changes to the index)')
 			print('  (use "asdf restore <file>" to discard changes in the working directory')
 			for i in not_for_commit:
-				print(f"      \033[91m modified: {i}\033[00m")
+				print(f"      \033[91m {i}\033[00m")
 			print()
 
 		if files:
@@ -521,7 +547,8 @@ def cmd_push(args):
 
 	post_response = requests.post(url + "/git-receive-pack", data=content, auth=(user, password))
 
-
+	with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
+		f.write(parent) 
 
 	
 
@@ -572,10 +599,14 @@ def read_remote(content, branch):
 
 	return "0"*40
 
+
+
 def cmd_clone(url):
 	get_response = requests.get(url + "/info/refs?service=git-upload-pack")
 
 	get_content = get_response.content
+
+	print(get_content)
 
 	assert re.match(rb"^[0-9a-f]{4}# service=git-upload-pack", get_content)
 
@@ -586,21 +617,48 @@ def cmd_clone(url):
 
 	print(remote_hash)
 
-	data = f"0032want {remote_hash}\n0032have {'0'*40}\n0000"
+	data = f"0032want {remote_hash}\n0032have {'0'*40}\n0000".encode()
+
+	print(data)
 
 	post_response = requests.post(url+"/git-upload-pack", data = data)
 
 	print(post_response.content)
 
 
+def bash_rm():
+	fields = read_index()
+	for i in fields:
+		print(i.path, end = " ")
+	print()
 
+def bash_add():
+	files = os.listdir()
+	files.remove(".git")
+	if os.path.exists('.gitignore'):
+		with open(".gitignore", "r") as f:
+			ignored_files = f.read().strip().split()
+	files = [i for i in files if i not in ignored_files]
+
+	fields = read_index()
+
+	for i in fields:
+		try:
+			if i.sha.hex() == cmd_hash_object(i.path, 'blob', False, True):
+				files.remove(i.path)
+		except:
+			pass
+
+	for i in files:
+		print(i, end=" ")
+	print()
 
 
 
 argparser = argparse.ArgumentParser(description="Content tracker")
 
-argsubparsers = argparser.add_subparsers(title="Command", dest="command")
 
+argsubparsers = argparser.add_subparsers(title="Command", dest="command")
 
 argsubparsers.required = True
 
@@ -657,21 +715,36 @@ argsp.add_argument("url", nargs="?")
 argsp = argsubparsers.add_parser("clone")
 argsp.add_argument("url")
 
+argsp = argsubparsers.add_parser("rm")
+argsp.add_argument("files", action = "store", help = "Files to be removed from the index", nargs="+")
+
+argsp = argsubparsers.add_parser("bash_rm")
+
+argsp = argsubparsers.add_parser("bash_add")
+
+argsp = argsubparsers.add_parser("test")
+
 
 def main(argv=sys.argv[1:]):
 	args = argparser.parse_args(argv)
 
 	if args.command == "init" : cmd_init(args.repo)
-	if args.command == "hash-object" : cmd_hash_object(args.file, args.type, args.write)
-	if args.command == "cat-file" : cmd_cat_file(args)
-	if args.command == "add" : cmd_add(args.files)
-	if args.command == "write-index" : write_index(args.file)
-	if args.command == "ls-files" : cmd_ls_files(args.stage)
-	if args.command == "commit" : cmd_commit(args.msg)
-	if args.command == "test" : cmd_test()
-	if args.command == "status" : cmd_status()
-	if args.command == "log" : cmd_log()
-	if args.command == "restore" : cmd_restore(args.file)
-	if args.command == "remote" : cmd_remote(args)
-	if args.command == "push" : cmd_push(args)
-	if args.command == "clone" : cmd_clone(args.url)
+	elif args.command == "clone" : cmd_clone(args.url)
+	else:
+		check_git()
+		if args.command == "hash-object" : cmd_hash_object(args.file, args.type, args.write)
+		elif args.command == "cat-file" : cmd_cat_file(args)
+		elif args.command == "add" : cmd_add(args.files)
+		elif args.command == "write-index" : write_index(args.file)
+		elif args.command == "ls-files" : cmd_ls_files(args.stage)
+		elif args.command == "commit" : cmd_commit(args.msg)
+		elif args.command == "test" : test()
+		elif args.command == "status" : cmd_status()
+		elif args.command == "log" : cmd_log()
+		elif args.command == "restore" : cmd_restore(args.file)
+		elif args.command == "remote" : cmd_remote(args)
+		elif args.command == "push" : cmd_push(args)
+		elif args.command == "rm" : cmd_rm(args.files)
+		elif args.command == "bash_rm" : bash_rm()
+		elif args.command == "bash_add" : bash_add()
+	

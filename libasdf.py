@@ -1,9 +1,11 @@
-import argparse, collections, stat, difflib, readline, hashlib, os, configparser, re, struct, sys, time, requests, zlib, datetime, time
+import argparse, collections, stat, hashlib, os, configparser, re, struct, sys, time, requests, zlib, datetime
 from operator import attrgetter
 from dotenv import load_dotenv
 from getpass import getpass
 from shutil import rmtree
-import argcomplete
+from dateutil.parser import parse
+from base64 import b64decode
+from pytz import timezone
 
 load_dotenv()
 
@@ -36,13 +38,22 @@ def default_config():
 
 	return config
 
-def cmd_init(repo=os.getcwd()):
+def cmd_init(args):
+	repo = args.repo
 	if os.path.exists(os.path.join(repo, '.git')):
 		print(f"Reinitialized exisiting Git repository in {os.path.join(repo, '.git')}")
 	else:
 		os.mkdir(os.path.join(repo,".git"))
-		author = input('Enter author name: ')
-		author_email = input('Enter author email: ')
+
+		if args.author_name:
+			author = args.author_name
+		else:
+			author = input('Enter author name: ')
+		
+		if args.author_email:
+			author_email = args.author_email	
+		else:
+			author_email = input('Enter author email: ')
 
 		with open(".env", "w") as f:
 			f.write(f'author = {author}\nauthor_email = {author_email}\n')
@@ -220,8 +231,9 @@ def cmd_commit(message):
 
 	data = f'tree {treeSha}\n'.encode()
 
+
 	if parent:
-		data += b'parent '+parent
+		data += b'parent ' + parent
 
 	date_seconds = int(time.mktime(datetime.datetime.now().timetuple()))
 	tz = -time.timezone
@@ -247,6 +259,8 @@ def cmd_commit(message):
 
 
 	data += message.encode()+b'\n'
+
+	print(data)
 
 	sha1 = cmd_hash_object(data, 'commit', filew=False)
 
@@ -547,8 +561,10 @@ def cmd_push(args):
 
 	post_response = requests.post(url + "/git-receive-pack", data=content, auth=(user, password))
 
-	with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
-		f.write(parent) 
+	print(post_response.content)
+	
+	# with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
+	# 	f.write(parent.encode()) 
 
 	
 
@@ -602,6 +618,7 @@ def read_remote(content, branch):
 
 
 def cmd_clone(url):
+
 	get_response = requests.get(url + "/info/refs?service=git-upload-pack")
 
 	get_content = get_response.content
@@ -615,15 +632,97 @@ def cmd_clone(url):
 
 	remote_hash = read_remote(get_content, "master")
 
-	print(remote_hash)
+	owner = url.split('/')[-2]
+	repo = url.split('/')[-1].split('.')[0]
+	print(owner, repo)
 
-	data = f"0032want {remote_hash}\n0032have {'0'*40}\n0000".encode()
+	api = f"https://api.github.com/repos/{owner}/{repo}/git"
 
-	print(data)
+	response = requests.get(api + f"/commits/{remote_hash}")
 
-	post_response = requests.post(url+"/git-upload-pack", data = data)
+	response_json = response.json()
 
-	print(post_response.content)
+	print(response_json)
+
+	
+	with open(".env", "w") as f:
+		f.write(f"author = {response_json['author']['name']}\nauthor_email = {response_json['author']['email']}")
+
+	cmd_init(argparse.Namespace(author_name=response_json['author']['name'], author_email=response_json['author']['email'], repo=os.getcwd()))
+
+	with open(".git/refs/heads/master", "wb") as f:
+		f.write(f"{response_json['sha']}\n".encode())
+
+	api_commit(response.json(), owner, repo)
+
+	tree_data = requests.get(response_json['tree']['url'])
+
+	tree_json = tree_data.json()
+
+	files = [i['path'] for i in tree_json['tree']]
+
+	cmd_add(files)
+
+
+def api_commit(response_data, owner, repo):
+	
+	
+	while True:
+		flag = 0
+		author_name = response_data['author']['name']
+		author_email = response_data['author']['email']
+		committer_name = response_data['committer']['name']
+		committer_email = response_data['committer']['email']
+		treeSha = response_data['tree']['sha']
+		data = f'tree {treeSha}\n'.encode()
+		if response_data['parents'] != []:
+			parent = response_data['parents'][0]['sha']
+			data += f'parent {parent}\n'.encode()
+		else:
+			flag = 1
+		zone = '+0530'
+		author_time = int(time.mktime(parse(response_data['author']['date'] + "+0000").astimezone(timezone('Asia/Kolkata')).timetuple()))
+		committer_time = int(time.mktime(parse(response_data['committer']['date'] + "+0000").astimezone(timezone('Asia/Kolkata')).timetuple()))
+
+		data += f"author {author_name} <{author_email}> {author_time} {zone}\n".encode()
+		data += f"committer {committer_name} <{committer_email}> {committer_time} {zone}\n\n".encode()
+
+		data += f'{response_data["message"]}\n'.encode()
+
+		with open(".git/commits", "ab+") as f:
+			f.write((response_data['sha'] + '\n').encode())
+
+		cmd_hash_object(data, 'commit', write=True, filew=False)
+
+		api_tree(response_data['tree']['url'])
+
+		if flag == 1:
+			break
+
+		response_data = requests.get(f'https://api.github.com/repos/{owner}/{repo}/git/commits/{response_data["parents"][0]["sha"]}').json()
+
+
+		
+def api_tree(tree_url):
+	response_data = requests.get(tree_url).json()
+	data = b''
+	tree_data = response_data['tree']
+	for i in tree_data:
+		data += f"{i['mode']} {i['path']}".encode()+b"\x00"
+		data += bytes.fromhex(i['sha'])
+		api_blob(i['url'], i['path'])
+
+	cmd_hash_object(data, 'tree', True, False)
+
+
+def api_blob(blob_url, path):
+	response_data = requests.get(blob_url).json()
+	data = b64decode(response_data['content']).decode()
+	with open(path, 'w') as f:
+		f.write(data)
+
+	cmd_hash_object(data.encode(), 'blob', True, False)
+
 
 
 def bash_rm():
@@ -664,6 +763,8 @@ argsubparsers.required = True
 
 argsp = argsubparsers.add_parser("init", help="Initialize repo")
 argsp.add_argument('repo', nargs="?", default=os.getcwd(), help="Where to create the repo")
+argsp.add_argument('-n', '--name', dest = 'author_name', help = "Name of the author")
+argsp.add_argument('-e', '--email', dest = 'author_email', help = "The author's email")
 
 argsp = argsubparsers.add_parser("hash-object", help="Hashing the provided file")
 argsp.add_argument('file', help="File to be hashed")
@@ -695,10 +796,6 @@ argsp = argsubparsers.add_parser("log", help="Shows the commit logs")
 argsp = argsubparsers.add_parser("restore", help="Restores the files to the last add command")
 argsp.add_argument("file")
 
-argsp = argsubparsers.add_parser("push")
-argsp.add_argument("name")
-argsp.add_argument("branch")
-
 argsp = argsubparsers.add_parser('remote')
 argdp = argsp.add_subparsers(title = "sub", dest="rsub")
 argfp = argdp.add_parser("add")
@@ -728,7 +825,7 @@ argsp = argsubparsers.add_parser("test")
 def main(argv=sys.argv[1:]):
 	args = argparser.parse_args(argv)
 
-	if args.command == "init" : cmd_init(args.repo)
+	if args.command == "init" : cmd_init(args)
 	elif args.command == "clone" : cmd_clone(args.url)
 	else:
 		check_git()

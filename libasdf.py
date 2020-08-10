@@ -280,17 +280,18 @@ def cmd_cat_file(*args):
 
 
 def read_tree(content):
-	null_index = content.find(b'\x00')
-	content = content[null_index+1:]
-	content = content.split(b' ')
-	data = ""
-	mode = content[0].decode()
-	for i in range(1,len(content)):
-		null_index = content[i].find(b'\x00')
-		name = content[i][:null_index]
-		hashmode = content[i][null_index+1:]
-		Hash = hashmode[:20].hex()
-		data += f"{mode} {Hash}    {name.decode()}\n"
+	i = 0
+	data = ''
+	content = content[content.find(b'\x00')+1:]
+	while True:
+		end = content.find(b'\x00', i)
+		if end == -1:
+			break
+		mode, path = content[i:end].decode().split()
+		digest = content[end+1:end+21].hex()
+		data += f"{mode} {digest}    {path}\n"
+		i = end + 21
+
 	return data
 
 

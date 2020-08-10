@@ -16,6 +16,9 @@ Types = {"commit": 1, "tree": 2, "blob": 3}
 #ONLY WORKS WITH ONE MAIN FOLDER. FOLDERS INSIDE MAIN FOLDER ARE NOT SUPPORTED
 
 def check_git():
+	
+	#Checks if the current directory is a git directory
+
 	present = os.getcwd()
 	if ".git" in os.listdir():
 		return
@@ -29,6 +32,9 @@ def check_git():
 	
 
 def default_config():
+
+	#Writes the default config for the directory
+
 	config = configparser.ConfigParser()
 
 	config.add_section("core")
@@ -39,6 +45,7 @@ def default_config():
 	return config
 
 def cmd_init(args):
+
 	repo = args.repo
 	if os.path.exists(os.path.join(repo, '.git')):
 		print(f"Reinitialized exisiting Git repository in {os.path.join(repo, '.git')}")
@@ -72,38 +79,6 @@ def cmd_init(args):
 			config.write(f)
 	if not os.path.exists('.git/refs/remotes'):
 		os.mkdir('.git/refs/remotes')
-
-
-def cmd_hash_object(file, object_type, write=True, filew=True):
-	if filew:
-		data = read_file(file)
-	else:
-		data = file
-
-	header = f'{object_type} {len(data)}'.encode()
-	full_data = header+b'\x00'+data
-	sha1 = hashlib.sha1(full_data).hexdigest()
-
-	if write:
-		path = f'.git/objects/{sha1[:2]}/{sha1[2:]}'
-		if not os.path.exists(path):
-			os.makedirs(os.path.dirname(path), exist_ok="True")
-			with open(path, "wb") as f:
-				f.write(zlib.compress(full_data))
-	return sha1
-
-def cmd_rm(paths):
-	fields = read_index()
-	fields = [i for i in fields if i.path not in paths]
-	write_index(fields)
-
-
-def read_file(file):
-	try:
-		with open(file, "rb") as f:
-			return f.read()
-	except FileNotFoundError:
-		return
 
 
 def read_index():
@@ -181,47 +156,6 @@ def write_index(entries):
 	with open(".git/index", "wb") as f:
 		f.write(full_data)
 
-
-
-def parent_hash():
-	if os.path.exists('.git/refs/heads/master'):
-		return read_file('.git/refs/heads/master')
-	else:
-		return None
-
-
-def cmd_ls_files(stage=False):
-	paths = read_index()
-	if not stage:
-		for i in paths:
-			print(i.path)
-
-	else:
-		for i in paths:
-			print(i.bit_mode, i.sha.hex(), i.path)
-
-
-def cmd_cat_file(*args):
-	with open(os.path.join('.git', 'objects', args[0].hash[:2], args[0].hash[2:]), "rb") as f:
-		content = zlib.decompress(f.read())
-		assert content.split()[0].decode() in ['commit', 'tree', 'blob']
-		
-		if args[0].type:
-			print(f"Type: {content.split()[0].decode()}")
-		
-		if args[0].size:
-			print(re.split(b"\x00", content.split()[1], 1)[0].decode())
-
-		if args[0].print:
-			print(f"Content:")
-			if content.split()[0].decode() == "tree":
-				print(read_tree(content))
-			else:
-				null_index = content.index(b'\x00')
-				print(content[null_index+1:].decode())
-
-
-
 def cmd_commit(message):
 	if not message:
 		message = input("Enter the commit messge: ")
@@ -260,8 +194,6 @@ def cmd_commit(message):
 
 	data += message.encode()+b'\n'
 
-	print(data)
-
 	sha1 = cmd_hash_object(data, 'commit', filew=False)
 
 	with open(".git/refs/heads/master", "wb") as f:
@@ -271,6 +203,79 @@ def cmd_commit(message):
 		f.write((sha1+'\n').encode())
 
 	return sha1
+
+
+def cmd_hash_object(file, object_type, write=True, filew=True):
+	if filew:
+		data = read_file(file)
+	else:
+		data = file
+
+	header = f'{object_type} {len(data)}'.encode()
+	full_data = header+b'\x00'+data
+	sha1 = hashlib.sha1(full_data).hexdigest()
+
+	if write:
+		path = f'.git/objects/{sha1[:2]}/{sha1[2:]}'
+		if not os.path.exists(path):
+			os.makedirs(os.path.dirname(path), exist_ok="True")
+			with open(path, "wb") as f:
+				f.write(zlib.compress(full_data))
+	return sha1
+
+
+def cmd_rm(paths):
+	fields = read_index()
+	fields = [i for i in fields if i.path not in paths]
+	write_index(fields)
+
+
+
+def read_file(file):
+	try:
+		with open(file, "rb") as f:
+			return f.read()
+	except FileNotFoundError:
+		return
+
+
+
+def parent_hash():
+	if os.path.exists('.git/refs/heads/master'):
+		return read_file('.git/refs/heads/master')
+	else:
+		return None
+
+
+def cmd_ls_files(stage=False):
+	paths = read_index()
+	if not stage:
+		for i in paths:
+			print(i.path)
+
+	else:
+		for i in paths:
+			print(oct(i.bit_mode)[2:], i.sha.hex(), i.path)
+
+
+def cmd_cat_file(*args):
+	with open(os.path.join('.git', 'objects', args[0].hash[:2], args[0].hash[2:]), "rb") as f:
+		content = zlib.decompress(f.read())
+		assert content.split()[0].decode() in ['commit', 'tree', 'blob']
+		
+		if args[0].type:
+			print(f"Type: {content.split()[0].decode()}")
+		
+		if args[0].size:
+			print(re.split(b"\x00", content.split()[1], 1)[0].decode())
+
+		if args[0].print:
+			print(f"Content:")
+			if content.split()[0].decode() == "tree":
+				print(read_tree(content))
+			else:
+				null_index = content.index(b'\x00')
+				print(content[null_index+1:].decode())
 
 
 
@@ -300,6 +305,7 @@ def write_tree():
 
 
 def cmd_status():
+
 	print()
 	
 	files = os.listdir()
@@ -395,16 +401,10 @@ def cmd_status():
 	
 	print()
 
-def cmd_restore(file):
-	fields = read_index()
-	sha = [i.sha for i in fields if i.path == file][0].hex()
-	with open(f".git/objects/{sha[:2]}/{sha[2:]}", "rb") as f:
-		data = re.split(b'\x00', zlib.decompress(f.read()), 1)[1]
-	with open(file, "w") as f:
-		f.write(data.decode())
-
-
 def cmd_log():
+
+	#Log of commits
+
 	if not os.path.exists(".git/commits"):
 		print("No commits have been made")
 		return
@@ -423,6 +423,18 @@ def cmd_log():
 		print(f"Date:   {date} {author_details[4]}")		
 		message = content[content.find('\n\n'):-1].strip()
 		print(f"\n      {message}\n")
+
+
+def cmd_restore(file):
+
+	#Restores a file in the index to its last added stage
+
+	fields = read_index()
+	sha = [i.sha for i in fields if i.path == file][0].hex()
+	with open(f".git/objects/{sha[:2]}/{sha[2:]}", "rb") as f:
+		data = re.split(b'\x00', zlib.decompress(f.read()), 1)[1]
+	with open(file, "w") as f:
+		f.write(data.decode())
 
 def cmd_remote(args):
 	
@@ -560,11 +572,9 @@ def cmd_push(args):
 
 
 	post_response = requests.post(url + "/git-receive-pack", data=content, auth=(user, password))
-
-	print(post_response.content)
 	
-	# with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
-	# 	f.write(parent.encode()) 
+	with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
+		f.write(parent.encode()) 
 
 	
 
@@ -574,6 +584,8 @@ def find_missing(parent, remote):
 		return local_obj
 	remote_obj = find_commit_objects(remote)
 	return local_obj - remote_obj
+
+
 
 def find_commit_objects(sha):
 	objects = {sha}
@@ -623,8 +635,6 @@ def cmd_clone(url):
 
 	get_content = get_response.content
 
-	print(get_content)
-
 	assert re.match(rb"^[0-9a-f]{4}# service=git-upload-pack", get_content)
 
 	get_content = get_content.split(b'\n')[2:-1]
@@ -634,15 +644,12 @@ def cmd_clone(url):
 
 	owner = url.split('/')[-2]
 	repo = url.split('/')[-1].split('.')[0]
-	print(owner, repo)
 
 	api = f"https://api.github.com/repos/{owner}/{repo}/git"
 
 	response = requests.get(api + f"/commits/{remote_hash}")
 
 	response_json = response.json()
-
-	print(response_json)
 
 	
 	with open(".env", "w") as f:
@@ -651,6 +658,11 @@ def cmd_clone(url):
 	cmd_init(argparse.Namespace(author_name=response_json['author']['name'], author_email=response_json['author']['email'], repo=os.getcwd()))
 
 	with open(".git/refs/heads/master", "wb") as f:
+		f.write(f"{response_json['sha']}\n".encode())
+
+	os.makedirs('.git/refs/remotes/origin')
+
+	with open(".git/refs/remotes/origin/master", "wb") as f:
 		f.write(f"{response_json['sha']}\n".encode())
 
 	api_commit(response.json(), owner, repo)
@@ -708,9 +720,13 @@ def api_tree(tree_url):
 	data = b''
 	tree_data = response_data['tree']
 	for i in tree_data:
-		data += f"{i['mode']} {i['path']}".encode()+b"\x00"
-		data += bytes.fromhex(i['sha'])
 		api_blob(i['url'], i['path'])
+		if i['mode'] == "100644":
+			i['mode'] = "100664"
+		elif i['mode'] == "100755":
+			os.chmod(i['path'], 0o700)
+		data += f"{i['mode']} {i['path']}".encode() + b'\x00'
+		data += bytes.fromhex(i['sha'])	 		
 
 	cmd_hash_object(data, 'tree', True, False)
 
@@ -726,12 +742,18 @@ def api_blob(blob_url, path):
 
 
 def bash_rm():
+
+	#Used to provide autocomplete options for asdf rm
+
 	fields = read_index()
 	for i in fields:
 		print(i.path, end = " ")
 	print()
 
 def bash_add():
+
+	#Autocomplete options for asdf add and restore
+
 	files = os.listdir()
 	files.remove(".git")
 	if os.path.exists('.gitignore'):
@@ -751,8 +773,6 @@ def bash_add():
 	for i in files:
 		print(i, end=" ")
 	print()
-
-
 
 argparser = argparse.ArgumentParser(description="Content tracker")
 
@@ -819,8 +839,6 @@ argsp = argsubparsers.add_parser("bash_rm")
 
 argsp = argsubparsers.add_parser("bash_add")
 
-argsp = argsubparsers.add_parser("test")
-
 
 def main(argv=sys.argv[1:]):
 	args = argparser.parse_args(argv)
@@ -835,7 +853,6 @@ def main(argv=sys.argv[1:]):
 		elif args.command == "write-index" : write_index(args.file)
 		elif args.command == "ls-files" : cmd_ls_files(args.stage)
 		elif args.command == "commit" : cmd_commit(args.msg)
-		elif args.command == "test" : test()
 		elif args.command == "status" : cmd_status()
 		elif args.command == "log" : cmd_log()
 		elif args.command == "restore" : cmd_restore(args.file)

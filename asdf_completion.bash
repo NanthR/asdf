@@ -20,7 +20,7 @@ _asdf_completions()
 			fi
 			;;
 		restore)
-			files=`ls -a`
+			files=`./asdf bash_rm | tail -n 1`
 			COMPREPLY=( $(compgen -W "${files}" -- $cur) )
 			;;
 		push)

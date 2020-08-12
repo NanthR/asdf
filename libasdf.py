@@ -6,14 +6,19 @@ from shutil import rmtree
 from dateutil.parser import parse
 from base64 import b64decode
 from pytz import timezone
+from pydoc import pager
+
 
 load_dotenv()
 
+global GIT_DIR
+
 IndexEntry = collections.namedtuple('IndexEntry', ['ctime_s', 'ctime_n', 'mtime_s', 'mtime_n', 'dev', 'ino', 'bit_mode', 'uid', 'gid', 'file_size', 'sha', 'flags', 'path'])
+FileStructure = collections.namedtuple('FileStructure', ['parent', 'own'])
+
 
 Types = {"commit": 1, "tree": 2, "blob": 3}
 
-#ONLY WORKS WITH ONE MAIN FOLDER. FOLDERS INSIDE MAIN FOLDER ARE NOT SUPPORTED
 
 def check_git():
 	
@@ -21,11 +26,11 @@ def check_git():
 
 	present = os.getcwd()
 	if ".git" in os.listdir():
-		return
+		return present
 	while present != "/":
 		present = os.path.dirname(present)
-		if ".git" in os.listdir():
-			return
+		if ".git" in os.listdir(present):
+			return present
 	print("\033[91m ERROR: Not a git repository\033[00m")
 	sys.exit()
 
@@ -83,12 +88,12 @@ def cmd_init(args):
 
 def read_index():
 	try:
-		if not os.path.exists('.git/index'):
+		if not os.path.exists(f'{GIT_DIR}/.git/index'):
 			return []
 
 		fields = []
 
-		index = read_file(os.path.join('.git', 'index'))
+		index = read_file(f'{GIT_DIR}/.git/index')
 
 		checksum = hashlib.sha1(index[:-20]).digest()
 
@@ -127,19 +132,31 @@ def read_index():
 
 def cmd_add(files):
 	present = read_index()
+	
+	files = [os.path.abspath(i).replace(GIT_DIR + "/", "") for i in files]
+
 	entries = [i for i in present if i.path not in files]
+
+	os.chdir(GIT_DIR)
 	
 	for i in files:
 		st = os.stat(i)
 		sha1 = cmd_hash_object(i, 'blob')
 		#Is a 16 bit field. The remaining bits are set to 0, since this version doesn't deal with merge conflicts and such; Last 12 bits are len(path) provided
 		flag = len(i.encode())
-		entries.append(IndexEntry(int(st.st_ctime), 0, int(st.st_mtime), 0, st.st_dev, st.st_ino, st.st_mode, st.st_uid, st.st_gid, st.st_size, bytes.fromhex(sha1), flag, i))
+		if oct(st.st_mode)[2:][3] == "7":
+			mode = 33261
+		else:
+			mode = 33188
+		entries.append(IndexEntry(int(st.st_ctime), 0, int(st.st_mtime), 0, st.st_dev, st.st_ino, mode, st.st_uid, st.st_gid, st.st_size, bytes.fromhex(sha1), flag, i))
 	entries = sorted(entries, key=attrgetter('path'))
-	write_index(entries)
+	write_index(entries) 
 
 
 def write_index(entries):
+
+	os.chdir(GIT_DIR)
+	
 	header = struct.pack('!4sLL', b'DIRC', 2, len(entries))
 
 	data = b''
@@ -157,10 +174,13 @@ def write_index(entries):
 		f.write(full_data)
 
 def cmd_commit(message):
+
+	os.chdir(GIT_DIR)
+
 	if not message:
 		message = input("Enter the commit messge: ")
 
-	treeSha = write_tree()
+	treeSha = set_up_tree()
 	parent = parent_hash()
 
 	data = f'tree {treeSha}\n'.encode()
@@ -226,7 +246,12 @@ def cmd_hash_object(file, object_type, write=True, filew=True):
 
 def cmd_rm(paths):
 	fields = read_index()
+	initial = len(fields)
+	paths = [os.path.abspath(i).replace(GIT_DIR + "/", "") for i in paths]
 	fields = [i for i in fields if i.path not in paths]
+	if initial == len(fields):
+		print("Files don't match")
+		return
 	write_index(fields)
 
 
@@ -295,135 +320,147 @@ def read_tree(content):
 	return data
 
 
-def write_tree():
+def set_up_tree():
 	data = read_index()
 	full_data = b''
+	files = []
 	for i in data:
-		full_data += f"{int(oct(i.bit_mode)[2:])} {i.path}".encode()+b"\x00"
-		full_data += i.sha
+		path = i.path
+		while True:
+			t = FileStructure(os.path.dirname(path), path)
+			if t not in files:
+				files.append(t)
+			if os.path.dirname(path) == "":
+				break
+			temp = path.split("/")
+			temp.pop()
+			path = '/'.join(temp)
 
-	return cmd_hash_object(full_data, 'tree', True, False)
+	files = sorted(files, key=attrgetter('parent'))
+
+	return write_tree(files, '')
+			
+
+def write_tree(files, parent):
+	fields = read_index()
+	data = b''
+	for i in files:
+		if os.path.isdir(i.own):
+			if i.parent == parent:
+				sha = bytes.fromhex(write_tree([j for j in files if j.parent != parent], i.own))
+				data += f'040000 {i.own.replace(parent + "/", "")}'.encode()+b'\x00'
+				data += sha
+		else:
+			if i.parent == parent:
+				sha = next(j.sha for j in fields if j.path == i.own)
+				mode = os.stat(i.own).st_mode
+				if oct(mode)[2:][3] == "7":
+					mode = 100755
+				else:
+					mode = 100644
+				path = i.own.replace(i.parent + "/", "")
+				data += f'{mode} {path}'.encode() + b'\x00'
+				data += sha
+	
+	return cmd_hash_object(data, 'tree', True, False)
 
 
 def cmd_status():
 
-	print()
-	
-	files = os.listdir()
-	files.remove('.git')
-	
+	os.chdir(GIT_DIR)
 
-	if os.path.isfile('.gitignore'):
-		with open(".gitignore", "r") as f:
-			ignored_files = f.read().strip().split('\n')
-		files = [i for i in files if i not in ignored_files]
+	print()
+
+	try:
+		with open(f"{GIT_DIR}/.gitignore", "r") as f:
+			ignored = f.read().strip().split('\n')
+	except:
+		ignored = []
+
 
 	fields = read_index()
+	untracked = []
+	added = []
+	modified = []
 
-	if os.path.isfile('.git/refs/heads/master'):
-		with open(".git/refs/heads/master", "rb") as f:
-			commit_hash = f.read().strip().decode()
-		with open(f".git/objects/{commit_hash[:2]}/{commit_hash[2:]}", "rb") as f:
-			tree_hash = re.split(b'\x00', zlib.decompress(f.read()), 1)[1].split(b' ')[1].split(b'\n')[0].decode()
-		with open(f".git/objects/{tree_hash[:2]}/{tree_hash[2:]}", "rb") as f:
-			m = zlib.decompress(f.read())
+	try:
+		with open(f"{GIT_DIR}/.git/refs/heads/master", "rb") as f:
+			parent = f.read().strip().decode()
+		commits = list(find_missing(parent, "0"*40))
+		commits.sort()
+	except FileExistsError:
+		commits = []
 
-		tree = read_tree(m).strip().split('\n')
-		tree_dict = {}
-		for i in tree:
-			tree_dict[i.split()[2]] = i.split()[1]
-		changed_files = []
-		not_for_commit = []
-
-		for i in fields:
-			flag = 0
-			try:
-				files.remove(i.path)
-			except ValueError:
-				not_for_commit.append(f"deleted:    {i.path}")
-				flag = 1
-			if i.path in tree_dict.keys():
-				if tree_dict[i.path] == i.sha.hex():
-					pass
-				else:
-					changed_files.append(f"modified: {i.path}")
-			else:
-				changed_files.append(f"new file: {i.path}")
-			
-			if flag == 0:
-				if i.sha.hex() != cmd_hash_object(i.path, 'blob', False, True):
-					not_for_commit.append(f"modified:   {i.path}")
-
-		if changed_files:
-			print("Changes to be committed")
-			for i in changed_files:
-				print(f"      \033[92m {i}\033[00m")
-			print()
-
-		if not_for_commit:
-			print("Changes not staged for commit")
-			print('  (use "asdf add <file>" to add the changes to the index)')
-			print('  (use "asdf restore <file>" to discard changes in the working directory')
-			for i in not_for_commit:
-				print(f"      \033[91m {i}\033[00m")
-			print()
-
-		if files:
-			print("Untracked files:")
-			print('  (use "asdf add <file>" to add them to the index)')
-			files.sort()
-			for i in files:
-				print(f"      \033[91m {i}\033[00m")
-			
-
-
+	for i in fields:
+		if i.sha.hex() not in commits:
+			added.append(f"    \033[92m {i.path}\033[00m")
+		if os.path.exists(f'{GIT_DIR}/{i.path}'):
+			if i.sha.hex() != cmd_hash_object(os.path.abspath(i.path), 'blob', write=False):
+				modified.append(f"modified: {i.path}")
+		else:
+			modified.append(f"deleted: {i.path}")
+	if added:
+		print("Changes to be committed:")
+		print('  (use "asdf commit" to commit the changes)')
+		for i in added:
+			print(i)
 	else:
-		if fields:
-			changed_fields = []
-			print("Changes to be committed")
-			for i in fields:
-				if i.sha.hex() != cmd_hash_object(i.path, 'blob', False, True):
-					changed_fields.append(i.path)
-				files.remove(i.path)
-				print(f"      \033[92m new file: {i.path}\033[00m")
-			print()
-			if changed_fields:
-				print("Changes not staged for commit:")
-				print('  (use "asdf add <file>" to update what will be committed)')
-				print('  (use "asdf restore <file>" to discard changes in the working directory')
-				for i in changed_fields:
-					print(f"      \033[91m modified: {i}\033[00m")
-				print()
-		if files:
-			print("Untracked files:")
-			print('  (use "asdf add <file>" to add them to the index)')
-			for i in files:
-				print(f"      \033[91m {i}\033[00m")
+		print("\033[92mNo changes to be committed\033[00m")
 	
+	if modified:
+		print("\nChanges not staged for commit")
+		print('  (use "asdf add <file>" to include in what will be committed)')
+		print('  (use "asdf restore <file>" to resore the file to its last added stage)')
+		for i in modified:
+			print(f"    \033[91m {i}\033[00m")
+	
+	exclude = set(['.git', '__pycache__'])
+	for i in ignored:
+		if os.path.isdir(GIT_DIR + "/" + i):
+			exclude.add(i)
+
+	for root, dirs, files in os.walk(os.getcwd()):
+		dirs[:] = [d for d in dirs if d not in exclude]
+		for i in files:
+			if not any(j.path == (f"{root}/{i}").replace(GIT_DIR + "/", "") for j in fields):
+				untracked.append(f"{root}/{i}")
+
+	untracked = [i.replace(GIT_DIR + "/", "") for i in untracked if i.replace(GIT_DIR + "/", "") not in ignored]
+	
+	if untracked:
+		print("\nUntracked files:")
+		print('  (use "asdf add <file>" to include in what will be committed)')
+		for i in untracked:
+			print(f"    \033[91m{i}\033[00m")
+
 	print()
 
 def cmd_log():
 
 	#Log of commits
 
-	if not os.path.exists(".git/commits"):
+	os.chdir(GIT_DIR)
+
+	if not os.path.exists(f".git/commits"):
 		print("No commits have been made")
 		return
-	with open(".git/commits", "rb") as f:
+	with open(f".git/commits", "rb") as f:
 		commits = f.read().strip().split(b'\n')
+	data = ""
 	for i in commits:
 		i = i.decode()
-		print(f"\033[33mcommit {i} \033[00m")
+		data += f"\033[33mcommit {i} \033[00m\n"
 		with open(os.path.join('.git','objects', i[:2], i[2:]), "rb") as f:
 			content = zlib.decompress(f.read()).decode()
 		start = content.find('author')
 		end = content.find('\n',start)
 		author_details = content[start:end].split()
-		print(f"Author: {author_details[1]} {author_details[2]}")
+		data += f"Author: {author_details[1]} {author_details[2]}\n"
 		date = datetime.datetime.fromtimestamp(int(author_details[3])).strftime("%A %B %d %I:%M:%S %Y")
-		print(f"Date:   {date} {author_details[4]}")		
+		data += f"Date:   {date} {author_details[4]}\n"		
 		message = content[content.find('\n\n'):-1].strip()
-		print(f"\n      {message}\n")
+		data+= f"\n      {message}\n"
+	pager(data)
 
 
 def cmd_restore(file):
@@ -432,7 +469,7 @@ def cmd_restore(file):
 
 	fields = read_index()
 	sha = [i.sha for i in fields if i.path == file][0].hex()
-	with open(f".git/objects/{sha[:2]}/{sha[2:]}", "rb") as f:
+	with open(f"{GIT_DIR}/.git/objects/{sha[:2]}/{sha[2:]}", "rb") as f:
 		data = re.split(b'\x00', zlib.decompress(f.read()), 1)[1]
 	with open(file, "w") as f:
 		f.write(data.decode())
@@ -440,27 +477,28 @@ def cmd_restore(file):
 def cmd_remote(args):
 	
 	if args.rsub == "add":
-		os.mkdir(f".git/refs/remotes/{args.name}")
+		os.mkdir(f"{GIT_DIR}/.git/refs/remotes/{args.name}")
 		config = configparser.ConfigParser()
 		config.add_section(f'remote "{args.name}"')
 		config.set(f'remote "{args.name}"', "url", args.url)
 		config.set(f'remote "{args.name}"', "fetch", f"+refs/heads/*:refs/remotes/{args.name}/*")
-		with open(".git/config", "a+") as f:
+		with open(f"{GIT_DIR}/.git/config", "a+") as f:
 			config.write(f)
 
 	elif args.rsub == "rm":
-		rmtree(f'.git/refs/remotes/{args.name}')
+		rmtree(f'{GIT_DIR}/.git/refs/remotes/{args.name}')
 		config = configparser.ConfigParser()
-		with open(".git/config", "r") as f:
+		with open(f"{GIT_DIR}.git/config", "r") as f:
 			config.readfp(f)
 		if f'remote "{args.name}"' in config.sections():
 			config.remove_section(f'remote "{args.name}"')
-			with open(".git/config", "w") as f:
+			with open(f"{GIT_DIR}/.git/config", "w") as f:
 				config.write(f)
 
 
 def cmd_push(args):
 
+	os.chdir(GIT_DIR)
 	config = configparser.ConfigParser()
 
 
@@ -573,7 +611,13 @@ def cmd_push(args):
 
 
 	post_response = requests.post(url + "/git-receive-pack", data=content, auth=(user, password))
-	
+
+	if post_response.content.split(b'\n')[0] == b"000eunpack ok":
+		print(f"Successfully pushed to {url}")
+
+	else:
+		print("ERROR")
+
 	with open(f".git/refs/remotes/{name}/{branch}", "wb") as f:
 		f.write(parent.encode()) 
 
@@ -590,7 +634,9 @@ def find_missing(parent, remote):
 
 def find_commit_objects(sha):
 	objects = {sha}
-	commit_data = zlib.decompress(read_file(f".git/objects/{sha[:2]}/{sha[2:]}"))
+	
+	commit_data = zlib.decompress(read_file(f"{GIT_DIR}/.git/objects/{sha[:2]}/{sha[2:]}"))
+	
 	commit_data = commit_data[commit_data.index(b'\x00') + 1:]
 
 	commit_split = commit_data.decode().split('\n')
@@ -610,11 +656,11 @@ def find_commit_objects(sha):
 
 
 def tree_data(tree_sha):
-	tree_contents = read_tree(zlib.decompress(read_file(f".git/objects/{tree_sha[:2]}/{tree_sha[2:]}")))
+	tree_contents = read_tree(zlib.decompress(read_file(f"{GIT_DIR}/.git/objects/{tree_sha[:2]}/{tree_sha[2:]}")))
 	tree_contents = tree_contents.strip().split('\n')
 	objects = {tree_sha}
 	for i in tree_contents:
-		if stat.S_ISDIR(int(i.split()[0])):
+		if stat.S_ISDIR(int(i.split()[0], 8)):
 			objects.update(tree_data(i.split()[1]))
 		else:
 			objects.add(i.split()[1])
@@ -751,30 +797,6 @@ def bash_rm():
 		print(i.path, end = " ")
 	print()
 
-def bash_add():
-
-	#Autocomplete options for asdf add and restore
-
-	files = os.listdir()
-	files.remove(".git")
-	if os.path.exists('.gitignore'):
-		with open(".gitignore", "r") as f:
-			ignored_files = f.read().strip().split()
-	files = [i for i in files if i not in ignored_files]
-
-	fields = read_index()
-
-	for i in fields:
-		try:
-			if i.sha.hex() == cmd_hash_object(i.path, 'blob', False, True):
-				files.remove(i.path)
-		except:
-			pass
-
-	for i in files:
-		print(i, end=" ")
-	print()
-
 argparser = argparse.ArgumentParser(description="Content tracker")
 
 
@@ -838,16 +860,15 @@ argsp.add_argument("files", action = "store", help = "Files to be removed from t
 
 argsp = argsubparsers.add_parser("bash_rm")
 
-argsp = argsubparsers.add_parser("bash_add")
-
 
 def main(argv=sys.argv[1:]):
 	args = argparser.parse_args(argv)
+	global GIT_DIR
 
 	if args.command == "init" : cmd_init(args)
 	elif args.command == "clone" : cmd_clone(args.url)
 	else:
-		check_git()
+		GIT_DIR = check_git()
 		if args.command == "hash-object" : cmd_hash_object(args.file, args.type, args.write)
 		elif args.command == "cat-file" : cmd_cat_file(args)
 		elif args.command == "add" : cmd_add(args.files)
@@ -861,5 +882,4 @@ def main(argv=sys.argv[1:]):
 		elif args.command == "push" : cmd_push(args)
 		elif args.command == "rm" : cmd_rm(args.files)
 		elif args.command == "bash_rm" : bash_rm()
-		elif args.command == "bash_add" : bash_add()
 	

@@ -166,9 +166,6 @@ def cmd_commit(message):
 	with open(".git/refs/heads/master", "wb") as f:
 		f.write((sha1+'\n').encode())
 
-	with open(".git/commits", "ab+") as f:
-		f.write((sha1+'\n').encode())
-
 	return sha1
 
 
